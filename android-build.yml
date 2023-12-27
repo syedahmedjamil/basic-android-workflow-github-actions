@@ -1,0 +1,116 @@
+name: Android CI - Test Build Upload
+
+on:
+  push:
+    paths-ignore:
+      - '.github/**'
+    branches: [ "main" ]
+
+jobs:
+  unit-test:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup JDK And Gradle
+        uses: ./.github/actions/setup-jdk-gradle
+        with:
+          cache-read-only: false
+          
+      - name: Run Unit Test
+        run: ./gradlew test
+
+      - name: Upload Unit Test Report
+        uses: actions/upload-artifact@v3
+        with:
+          name: unit-test-report
+          path: app/build/reports/unitTests/tests/testDebugUnitTest
+
+  instrumented-test:
+    needs: [unit-test]
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup JDK And Gradle
+        uses: ./.github/actions/setup-jdk-gradle
+        with:
+          cache-read-only: false
+    
+      - name: Run instrumented Test
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 29
+          force-avd-creation: false
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: ./gradlew connectedAndroidTest
+      
+      - name: Upload instrumented Test Report
+        uses: actions/upload-artifact@v3
+        with:
+          name: instrumented-test-report
+          path: app/build/reports/androidTests/connected/debug
+
+  assemble-debug:
+    needs: [unit-test, instrumented-test]
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup JDK And Gradle
+        uses: ./.github/actions/setup-jdk-gradle
+        with:
+          cache-read-only: false
+
+      - name: Get Google Services Json
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          echo $CERTIFICATE_BASE64 | base64 --decode > app/google-services.json
+    
+      - name: Assemble Debug Apk
+        run: ./gradlew assembleDebug
+        
+      - name: Upload Debug Apk
+        uses: actions/upload-artifact@v3
+        with:
+          name: debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          
+  upload:
+    needs: [assemble-debug]
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup JDK And Gradle
+        uses: ./.github/actions/setup-jdk-gradle
+        with:
+          cache-read-only: false        
+
+      - name: Get App Release Signing Key
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.APP_RELEASE_SIGNING_KEY }}
+        run: |
+          echo $CERTIFICATE_BASE64 | base64 --decode > app/my-release-key.jks
+
+      - name: Get Firebase App Distribution Key
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.FIREBASE_APP_DISTRIBUTION_KEY }}
+        run: |
+          echo $CERTIFICATE_BASE64 | base64 --decode > app/firebase-app-distribution-key.json
+
+      - name: Assemble Signed Release Apk
+        run: ./gradlew assembleRelease
+
+      - name: Generate Release Notes From Last Commit
+        run: git log -1 > app/release-notes.txt
+
+      - name: Upload To Firebase App Distribution
+        run: ./gradlew appDistributionUploadRelease
